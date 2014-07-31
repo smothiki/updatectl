@@ -5,11 +5,14 @@ import (
 	"code.google.com/p/go-uuid/uuid"
 	"encoding/xml"
 	"fmt"
-	update "github.com/coreos/updatectl/client/update/v1"
 	"github.com/coreos/go-omaha/omaha"
+	update "github.com/coreos/updatectl/client/update/v1"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
+	"os/exec"
 	"text/tabwriter"
 	"time"
 )
@@ -31,8 +34,8 @@ var (
 	}
 
 	cmdInstance = &Command{
-		Name:        "instance",
-		Usage:       "[OPTION]...",
+		Name:    "instance",
+		Usage:   "[OPTION]...",
 		Summary: "Operations to view instances.",
 		Subcommands: []*Command{
 			cmdInstanceListUpdates,
@@ -113,6 +116,49 @@ func instanceListUpdates(args []string, service *update.Service, out *tabwriter.
 	}
 	out.Flush()
 	return OK
+}
+
+func getCodebaseUrl(uc *omaha.UpdateCheck) string {
+	return uc.Urls.Urls[0].CodeBase
+}
+
+func updateservice() {
+	fmt.Println("executing updater.sh")
+	cmd := exec.Command("sh", "-c", "/home/core/updater.sh")
+	if out, err := cmd.Output(); err != nil {
+		fmt.Printf("%v\nOutput:\n%v", err, string(out))
+	} else {
+		fmt.Println("ok")
+	}
+}
+
+func downloadFromUrl(url, fileName string) (err error) {
+	url = url + "webapp.tar.gz"
+	fmt.Printf("Downloading %s to %s", url, fileName)
+
+	// TODO: check file existence first with io.IsExist
+	output, err := os.Create("/home/core/" + fileName)
+	if err != nil {
+		fmt.Println("Error while creating", fileName, "-", err)
+		return
+	}
+	defer output.Close()
+
+	response, err := http.Get(url)
+	if err != nil {
+		fmt.Println("Error while downloading", url, "-", err)
+		return
+	}
+	defer response.Body.Close()
+
+	n, err := io.Copy(output, response.Body)
+	if err != nil {
+		fmt.Println("Error while downloading", url, "-", err)
+		return
+	}
+
+	fmt.Println(n, "bytes downloaded.")
+	return
 }
 
 func instanceListAppVersions(args []string, service *update.Service, out *tabwriter.Writer) int {
@@ -238,42 +284,16 @@ func (c *Client) SetVersion(resp *omaha.Response) {
 
 	uc := resp.Apps[0].UpdateCheck
 	if uc.Status != "ok" {
-		c.Log("%s\n", uc.Status)
+		c.Log("update check status: %s\n", uc.Status)
 		return
 	}
-
-	randFailRequest := func(eventType, eventResult string) (failed bool, err error) {
-		if rand.Intn(100) <= c.errorRate {
-			eventType = "3"
-			eventResult = "0"
-			failed = true
-		}
-		_, err = c.MakeRequest(eventType, eventResult, false, false)
-		return
-	}
-
-	requests := [][]string{
-		[]string{"13", "1"}, // downloading
-		[]string{"14", "1"}, // downloaded
-		[]string{"3", "1"},  // installed
-	}
-
-	for i, r := range requests {
-		if i > 0 {
-			time.Sleep(1 * time.Second)
-		}
-		failed, err := randFailRequest(r[0], r[1])
-		if failed {
-			log.Printf("failed to update in eventType: %s, eventResult: %s. Retrying.", r[0], r[1])
-			time.Sleep(time.Second * time.Duration(instanceFlags.minSleep))
-			c.MakeRequest(r[0], r[1], false, false)
-			return
-		}
-		if err != nil {
-			log.Println(err)
-			return
-		}
-	}
+	url := getCodebaseUrl(uc)
+	c.MakeRequest("13", "1", false, false)
+	downloadFromUrl(url, "webapp.tar.gz")
+	c.MakeRequest("14", "1", false, false)
+	updateservice()
+	c.MakeRequest("3", "1", false, false)
+	// installed
 
 	// simulate reboot lock for a while
 	for c.pingsRemaining > 0 {

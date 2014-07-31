@@ -2,12 +2,15 @@
 
 export GOPATH=${PWD}/Godeps/_workspace
 export GOBIN=${PWD}/bin
+export GOOS=linux
+export GOARCH=386
+export CGO_ENABLED=0
 
-if [ ! -h $GOPATH/src/github.com/coreos/updatectl ]; then
-    mkdir -p $GOPATH/src/github.com/coreos/
-    ln -s ${PWD} $GOPATH/src/github.com/coreos/updatectl
+if [ ! -h $GOPATH/src/github.com/updatectl ]; then
+    mkdir -p $GOPATH/src/github.com/
+    ln -s ${PWD} $GOPATH/src/github.com/updatectl
 fi
 
 eval $(go env)
 
-go install github.com/coreos/updatectl
+go install github.com/updatectl
