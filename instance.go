@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"github.com/coreos/go-omaha/omaha"
 	update "github.com/coreos/updatectl/client/update/v1"
+	"github.com/updatectl/systemd"
 	"io"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
-	"os/exec"
 	"text/tabwriter"
 	"time"
 )
@@ -118,49 +118,6 @@ func instanceListUpdates(args []string, service *update.Service, out *tabwriter.
 	return OK
 }
 
-func getCodebaseUrl(uc *omaha.UpdateCheck) string {
-	return uc.Urls.Urls[0].CodeBase
-}
-
-func updateservice() {
-	fmt.Println("executing updater.sh")
-	cmd := exec.Command("sh", "-c", "/home/core/updater.sh")
-	if out, err := cmd.Output(); err != nil {
-		fmt.Printf("%v\nOutput:\n%v", err, string(out))
-	} else {
-		fmt.Println("ok")
-	}
-}
-
-func downloadFromUrl(url, fileName string) (err error) {
-	url = url + "webapp.tar.gz"
-	fmt.Printf("Downloading %s to %s", url, fileName)
-
-	// TODO: check file existence first with io.IsExist
-	output, err := os.Create("/home/core/" + fileName)
-	if err != nil {
-		fmt.Println("Error while creating", fileName, "-", err)
-		return
-	}
-	defer output.Close()
-
-	response, err := http.Get(url)
-	if err != nil {
-		fmt.Println("Error while downloading", url, "-", err)
-		return
-	}
-	defer response.Body.Close()
-
-	n, err := io.Copy(output, response.Body)
-	if err != nil {
-		fmt.Println("Error while downloading", url, "-", err)
-		return
-	}
-
-	fmt.Println(n, "bytes downloaded.")
-	return
-}
-
 func instanceListAppVersions(args []string, service *update.Service, out *tabwriter.Writer) int {
 	call := service.Appversion.List()
 
@@ -205,11 +162,50 @@ type Client struct {
 	config         *serverConfig
 	errorRate      int
 	pingsRemaining int
+	conn           *systemd.SystemdUnitManager
 }
 
 func (c *Client) Log(format string, v ...interface{}) {
 	format = c.Id + ": " + format
 	fmt.Printf(format, v...)
+}
+
+func (c *Client) getCodebaseUrl(uc *omaha.UpdateCheck) string {
+	return uc.Urls.Urls[0].CodeBase
+}
+
+func (c *Client) updateservice() {
+	fmt.Println("starting systemd unit")
+	c.conn.Start("deis-cache.service")
+}
+
+func (c *Client) downloadFromUrl(url, fileName string) (err error) {
+	url = url + "deis-cache.service"
+	fmt.Printf("Downloading %s to %s", url, fileName)
+
+	// TODO: check file existence first with io.IsExist
+	output, err := os.Create("/home/core/" + fileName)
+	if err != nil {
+		fmt.Println("Error while creating", fileName, "-", err)
+		return
+	}
+	defer output.Close()
+
+	response, err := http.Get(url)
+	if err != nil {
+		fmt.Println("Error while downloading", url, "-", err)
+		return
+	}
+	defer response.Body.Close()
+
+	n, err := io.Copy(output, response.Body)
+	if err != nil {
+		fmt.Println("Error while downloading", url, "-", err)
+		return
+	}
+
+	fmt.Println(n, "bytes downloaded.")
+	return
 }
 
 func (c *Client) OmahaRequest(otype, result string, updateCheck, isPing bool) *omaha.Request {
@@ -287,14 +283,15 @@ func (c *Client) SetVersion(resp *omaha.Response) {
 		c.Log("update check status: %s\n", uc.Status)
 		return
 	}
-	url := getCodebaseUrl(uc)
+	url := c.getCodebaseUrl(uc)
 	c.MakeRequest("13", "1", false, false)
-	downloadFromUrl(url, "webapp.tar.gz")
+	c.downloadFromUrl(url, "deis-cache.service")
 	c.MakeRequest("14", "1", false, false)
-	updateservice()
+	c.updateservice()
+	fmt.Println("updated done")
 	c.MakeRequest("3", "1", false, false)
 	// installed
-
+	fmt.Println("updated done")
 	// simulate reboot lock for a while
 	for c.pingsRemaining > 0 {
 		c.MakeRequest("", "", false, true)
@@ -357,6 +354,7 @@ func instanceFake(args []string, service *update.Service, out *tabwriter.Writer)
 			errorRate:      instanceFlags.errorRate,
 			pingsRemaining: instanceFlags.pingOnly,
 		}
+		c.conn, _ = systemd.NewSystemdUnitManager()
 		go c.Loop(instanceFlags.minSleep, instanceFlags.maxSleep)
 	}
 
