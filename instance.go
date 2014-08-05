@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/coreos/go-omaha/omaha"
 	update "github.com/coreos/updatectl/client/update/v1"
+	"github.com/updatectl/lock"
 	"github.com/updatectl/systemd"
 	"io"
 	"log"
@@ -15,6 +16,11 @@ import (
 	"os"
 	"text/tabwriter"
 	"time"
+)
+
+const (
+	initialInterval = time.Second * 5
+	maxInterval     = time.Minute * 5
 )
 
 var (
@@ -149,6 +155,14 @@ func instanceListAppVersions(args []string, service *update.Service, out *tabwri
 	return OK
 }
 
+func expBackoff(interval time.Duration) time.Duration {
+	interval = interval * 2
+	if interval > maxInterval {
+		interval = maxInterval
+	}
+	return interval
+}
+
 type serverConfig struct {
 	server string
 }
@@ -163,6 +177,7 @@ type Client struct {
 	errorRate      int
 	pingsRemaining int
 	conn           *systemd.SystemdUnitManager
+	lock           *lock.Lock
 }
 
 func (c *Client) Log(format string, v ...interface{}) {
@@ -270,6 +285,20 @@ func (c *Client) MakeRequest(otype, result string, updateCheck, isPing bool) (*o
 	return oresp, nil
 }
 
+func (c *Client) RequestLock() {
+	elc, err := lock.NewEtcdLockClient(nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error initializing etcd client:", err)
+	}
+
+	var mID string
+	mID = lock.GetMachineID("/")
+	if mID == "" {
+		fmt.Fprintln(os.Stderr, "Cannot read machine-id")
+	}
+	c.lock = lock.New(mID, elc)
+}
+
 func (c *Client) SetVersion(resp *omaha.Response) {
 	// A field can potentially be nil.
 	defer func() {
@@ -313,15 +342,31 @@ func (c *Client) SetVersion(resp *omaha.Response) {
 
 // Sleep between n and m seconds
 func (c *Client) Loop(n, m int) {
+	interval := initialInterval
 	for {
 		randSleep(n, m)
-
 		resp, err := c.MakeRequest("3", "2", true, false)
 		if err != nil {
 			log.Println(err)
 			continue
 		}
+		c.RequestLock()
+		err = c.lock.Lock()
+		if err != nil && err != lock.ErrExist {
+			interval = expBackoff(interval)
+			fmt.Printf("Retrying in %v. Error locking: %v\n", interval, err)
+			time.Sleep(interval)
+			continue
+		}
 		c.SetVersion(resp)
+		err = c.lock.Unlock()
+		if err == lock.ErrNotExist {
+			fmt.Println("no lock found")
+		} else if err == nil {
+			fmt.Println("Unlocked existing lock for this machine")
+		} else {
+			fmt.Fprintln(os.Stderr, "Error unlocking:", err)
+		}
 	}
 }
 
@@ -355,6 +400,7 @@ func instanceFake(args []string, service *update.Service, out *tabwriter.Writer)
 			pingsRemaining: instanceFlags.pingOnly,
 		}
 		c.conn, _ = systemd.NewSystemdUnitManager()
+		c.lock = nil
 		go c.Loop(instanceFlags.minSleep, instanceFlags.maxSleep)
 	}
 
