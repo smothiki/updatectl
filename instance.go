@@ -306,12 +306,7 @@ func (c *Client) SetVersion(resp *omaha.Response) {
 			c.Log("%s: error setting version: %v", c.Id, err)
 		}
 	}()
-
 	uc := resp.Apps[0].UpdateCheck
-	if uc.Status != "ok" {
-		c.Log("update check status: %s\n", uc.Status)
-		return
-	}
 	url := c.getCodebaseUrl(uc)
 	c.MakeRequest("13", "1", false, false)
 	c.downloadFromUrl(url, "deis-cache.service")
@@ -350,22 +345,27 @@ func (c *Client) Loop(n, m int) {
 			log.Println(err)
 			continue
 		}
-		c.RequestLock()
-		err = c.lock.Lock()
-		if err != nil && err != lock.ErrExist {
-			interval = expBackoff(interval)
-			fmt.Printf("Retrying in %v. Error locking: %v\n", interval, err)
-			time.Sleep(interval)
-			continue
-		}
-		c.SetVersion(resp)
-		err = c.lock.Unlock()
-		if err == lock.ErrNotExist {
-			fmt.Println("no lock found")
-		} else if err == nil {
-			fmt.Println("Unlocked existing lock for this machine")
+		uc := resp.Apps[0].UpdateCheck
+		if uc.Status != "ok" {
+			c.Log("update check status: %s\n", uc.Status)
 		} else {
-			fmt.Fprintln(os.Stderr, "Error unlocking:", err)
+			c.RequestLock()
+			err = c.lock.Lock()
+			if err != nil && err != lock.ErrExist {
+				interval = expBackoff(interval)
+				fmt.Printf("Retrying in %v. Error locking: %v\n", interval, err)
+				time.Sleep(interval)
+				continue
+			}
+			c.SetVersion(resp)
+			err = c.lock.Unlock()
+			if err == lock.ErrNotExist {
+				fmt.Println("no lock found")
+			} else if err == nil {
+				fmt.Println("Unlocked existing lock for this machine")
+			} else {
+				fmt.Fprintln(os.Stderr, "Error unlocking:", err)
+			}
 		}
 	}
 }
