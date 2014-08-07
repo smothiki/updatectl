@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/coreos/go-omaha/omaha"
 	update "github.com/coreos/updatectl/client/update/v1"
+	"github.com/deis/deis-without-fleet/tests/utils"
 	"github.com/updatectl/lock"
 	"github.com/updatectl/systemd"
 	"io"
@@ -14,13 +15,15 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 )
 
 const (
-	initialInterval = time.Second * 5
-	maxInterval     = time.Minute * 5
+	initialInterval = time.Second * 10
+	maxInterval     = time.Minute * 7
+	downloadDir     = "/home/core/deis/systemd/"
 )
 
 var (
@@ -155,6 +158,8 @@ func instanceListAppVersions(args []string, service *update.Service, out *tabwri
 	return OK
 }
 
+//+ downloadDir + "deis.tar.gz"
+
 func expBackoff(interval time.Duration) time.Duration {
 	interval = interval * 2
 	if interval > maxInterval {
@@ -190,22 +195,30 @@ func (c *Client) getCodebaseUrl(uc *omaha.UpdateCheck) string {
 }
 
 func (c *Client) updateservice() {
-	fmt.Println("starting systemd unit")
-	c.conn.Start("deis-cache.service")
+	fmt.Println("starting systemd units")
+	files, _ := utils.ListFiles(downloadDir + "*.service")
+	fmt.Println(files)
+	c.conn.Enable(files)
+	for _, file := range files {
+		fmt.Println(file)
+		_, file = filepath.Split(file)
+		fmt.Println(file)
+		c.conn.Start(file)
+	}
+	//c.conn.Start("deis-cache.service")
 }
 
 func (c *Client) downloadFromUrl(url, fileName string) (err error) {
-	url = url + "deis-cache.service"
+	url = url + "deis.tar.gz"
 	fmt.Printf("Downloading %s to %s", url, fileName)
 
 	// TODO: check file existence first with io.IsExist
-	output, err := os.Create("/home/core/" + fileName)
+	output, err := os.Create(downloadDir + fileName)
 	if err != nil {
 		fmt.Println("Error while creating", fileName, "-", err)
 		return
 	}
 	defer output.Close()
-
 	response, err := http.Get(url)
 	if err != nil {
 		fmt.Println("Error while downloading", url, "-", err)
@@ -309,7 +322,8 @@ func (c *Client) SetVersion(resp *omaha.Response) {
 	uc := resp.Apps[0].UpdateCheck
 	url := c.getCodebaseUrl(uc)
 	c.MakeRequest("13", "1", false, false)
-	c.downloadFromUrl(url, "deis-cache.service")
+	c.downloadFromUrl(url, "deis.tar.gz")
+	utils.Extract(downloadDir+"deis.tar.gz", downloadDir)
 	c.MakeRequest("14", "1", false, false)
 	c.updateservice()
 	fmt.Println("updated done")

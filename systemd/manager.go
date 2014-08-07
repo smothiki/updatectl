@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"github.com/coreos/go-systemd/dbus"
 	"log"
-	"os"
 	"path/filepath"
 )
 
 const (
-	RunUnitsDirectory = "/run/systemd/system/"
-	EtcUnitsDirectory = "/etc/systemd/system/"
+	UnitsDirectory          = "/etc/systemd/system/"
+	MultiUserUnitsDirectory = "/etc/systemd/system/multi-user.target.wants/"
 )
 
 type systemdUnitstate struct {
@@ -33,7 +32,7 @@ func NewSystemdUnitManager() (*SystemdUnitManager, error) {
 
 	mgr := SystemdUnitManager{
 		systemd:  systemd,
-		UnitsDir: RunUnitsDirectory,
+		UnitsDir: UnitsDirectory,
 		State:    nil,
 	}
 	return &mgr, nil
@@ -43,17 +42,12 @@ func setupUnit(target string, conn *dbus.Conn) {
 	// Blindly stop the unit in case it is running
 	conn.StopUnit(target, "replace")
 
-	// Blindly remove the symlink in case it exists
-	targetRun := filepath.Join(RunUnitsDirectory, target)
-	os.Remove(targetRun)
-	targetRun = filepath.Join(EtcUnitsDirectory, target)
-	os.Remove(targetRun)
 }
 
 func linkUnit(target string, conn *dbus.Conn) {
 	abs := "/home/core/" + target
 	fixture := []string{abs}
-	changes, err := conn.LinkUnitFiles(fixture, true, true)
+	changes, err := conn.LinkUnitFiles(fixture, false, true)
 	if err != nil {
 		log.Fatalf("linkunit  failed  %v", err)
 	}
@@ -62,7 +56,7 @@ func linkUnit(target string, conn *dbus.Conn) {
 		log.Fatalf("Expected one change, got %v", changes)
 	}
 
-	runPath := filepath.Join(RunUnitsDirectory, target)
+	runPath := filepath.Join(UnitsDirectory, target)
 	if changes[0].Filename != runPath {
 		log.Fatal("Unexpected target filename")
 	}
@@ -74,6 +68,14 @@ func (m *SystemdUnitManager) Start(name string) {
 
 func (m *SystemdUnitManager) Stop(name string) {
 	m.stopUnit(name)
+}
+
+func (m *SystemdUnitManager) Enable(files []string) {
+	m.EnableUnitFiles(files)
+}
+
+func (m *SystemdUnitManager) Disable(files []string) {
+	m.DisableUnitFiles(files)
 }
 
 func (m *SystemdUnitManager) GetUnitState(name string) (*systemdUnitstate, error) {
@@ -90,8 +92,6 @@ func (m *SystemdUnitManager) GetUnitState(name string) (*systemdUnitstate, error
 }
 
 func (m *SystemdUnitManager) startUnit(name string) {
-	setupUnit(name, m.systemd)
-	linkUnit(name, m.systemd)
 	job, err := m.systemd.StartUnit(name, "replace")
 	if err != nil {
 		log.Fatalf("Failed to start systemd unit %s: %v", name, err)
@@ -125,9 +125,9 @@ func (m *SystemdUnitManager) stopUnit(name string) {
 	stat, err := m.systemd.StopUnit(name, "replace")
 	if err != nil {
 		log.Fatalf("Failed to stop systemd unit %s: %v", name, err)
-	} else {
-		log.Fatalf("Stopped systemd unit %s(%s)", name, stat)
 	}
+	fmt.Printf("Stopped systemd unit %s(%s)", name, stat)
+
 	units, err := m.systemd.ListUnits()
 	var unit *dbus.UnitStatus
 	unit = nil
@@ -139,5 +139,42 @@ func (m *SystemdUnitManager) stopUnit(name string) {
 
 	if unit != nil {
 		log.Fatalf("Test unit found in list, should be stopped")
+	}
+}
+
+func (m *SystemdUnitManager) daemonReload() error {
+	fmt.Println("Instructing systemd to reload units")
+	return m.systemd.Reload()
+}
+
+func (m *SystemdUnitManager) EnableUnitFiles(files []string) {
+	install, changes, err := m.systemd.EnableUnitFiles(files, false, true)
+	if err != nil {
+		log.Fatalf("Error failed enable %v", err)
+	}
+
+	if install != false {
+		fmt.Println("Install was true")
+	}
+
+	if len(changes) < 1 {
+		log.Fatalf("Expected one change, got %v", changes)
+	}
+	if err = m.daemonReload(); err != nil {
+		fmt.Println("reload failed")
+	}
+}
+
+func (m *SystemdUnitManager) DisableUnitFiles(files []string) {
+	dChanges, err := m.systemd.DisableUnitFiles(files, false)
+	if err != nil {
+		log.Fatalf("Error failed disable %v", err)
+	}
+
+	if len(dChanges) != 1 {
+		log.Fatalf("Changes should include the path, %v", dChanges)
+	}
+	if dChanges[0].Destination != "" {
+		log.Fatalf("Change destination should be empty, %+v", dChanges[0])
 	}
 }
